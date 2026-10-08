@@ -95,9 +95,7 @@ def lock_down_rest_api(db: Database) -> None:
             r for (r,) in conn.execute(text("SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')"))
         }
         auth_schema_exists = conn.execute(text("SELECT 1 FROM pg_namespace WHERE nspname = 'auth'")).scalar()
-        can_configure_realtime = (
-            "authenticated" in roles and "chat_messages" in tables and bool(auth_schema_exists)
-        )
+        can_configure_realtime = "authenticated" in roles and "chat_messages" in tables and bool(auth_schema_exists)
         if "authenticated" in roles and "chat_messages" in tables and not auth_schema_exists:
             log.warning("PostgreSQL auth schema is missing; chat will use the WebSocket fallback")
         views = [v for (v,) in conn.execute(text("SELECT viewname FROM pg_views WHERE schemaname = current_schema()"))]

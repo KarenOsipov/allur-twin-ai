@@ -60,19 +60,13 @@ def _ensure_failover_state(db: Database) -> None:
 
 def _local_changes_pending(db: Database) -> bool:
     with db.engine.connect() as connection:
-        return bool(
-            connection.scalar(
-                text(f"SELECT local_changes_pending FROM {FAILOVER_STATE_TABLE} WHERE id = 1")
-            )
-        )
+        return bool(connection.scalar(text(f"SELECT local_changes_pending FROM {FAILOVER_STATE_TABLE} WHERE id = 1")))
 
 
 def _set_local_changes_pending(db: Database, pending: bool) -> None:
     with db.engine.begin() as connection:
         connection.execute(
-            text(
-                f"UPDATE {FAILOVER_STATE_TABLE} SET local_changes_pending = :pending WHERE id = 1"
-            ),
+            text(f"UPDATE {FAILOVER_STATE_TABLE} SET local_changes_pending = :pending WHERE id = 1"),
             {"pending": pending},
         )
 
@@ -273,9 +267,7 @@ class Container:
                 _set_local_changes_pending(self.db.local, True)
             prepare_database(self.db.local, self.plant)
             local_has_data = _has_application_data(self.db.local)
-            primary_has_data = (
-                _has_application_data(self.db.primary) if self.db.state["primary_ok"] else False
-            )
+            primary_has_data = _has_application_data(self.db.primary) if self.db.state["primary_ok"] else False
         else:
             local_has_data = False
             primary_has_data = False

@@ -48,7 +48,7 @@ def test_supabase_url_is_normalized():
     s = Settings(supabase_db_url="postgres://u:p@db.x.supabase.co:5432/postgres?sslmode=verify-full")
     assert s.primary_db_url.count("sslmode") == 1
     assert Settings(supabase_db_url="").primary_db_url is None
-    assert Settings().primary_db_url is None
+    assert Settings(_env_file=None).primary_db_url is None
 
 
 def test_replicate_copies_everything(tmp_path):
@@ -183,9 +183,7 @@ def test_supabase_access_token_cannot_be_used_as_app_token():
 def test_supabase_access_token_is_verified_by_auth_api(monkeypatch):
     from app.services.supabase_sync import SupabaseSyncService
 
-    service = SupabaseSyncService(
-        Settings(supabase_url="https://project.supabase.co", supabase_anon_key="public-key")
-    )
+    service = SupabaseSyncService(Settings(supabase_url="https://project.supabase.co", supabase_anon_key="public-key"))
 
     class Response:
         status_code = 200

@@ -37,18 +37,6 @@ docker compose up --build
 | Запустить снова | `docker compose up -d` |
 | Начать с чистой базы | `docker compose down -v && docker compose up --build` |
 
-### Подключить Supabase
-
-Добавьте в файл `.env` (рядом с `docker-compose.yml`) строку подключения из Supabase и перезапустите
-`docker compose up -d --build`:
-
-```bash
-SUPABASE_DB_URL=postgresql://postgres.<ref>:<пароль>@aws-0-<регион>.pooler.supabase.com:5432/postgres
-```
-
-Локальная база остаётся зеркалом: если Supabase недоступен, система сама работает на ней и потом переносит
-данные обратно. Подробно — [docs/SUPABASE.md](docs/SUPABASE.md).
-
 ### Вход
 
 Вход по PIN-коду или по логину и паролю. На экране входа есть список демо-доступов — нажмите строку, и данные подставятся.

@@ -26,12 +26,55 @@ def health(c: ContainerDep) -> dict:
         "assistant": c.assistant.llm.label,
         "database": "supabase" if c.db.is_primary else "local",
         "database_fallback": c.db.state["configured"] and not c.db.is_primary,
+        "supabase_connected": c.db.is_primary and (c.db.state.get("primary_ok") is True),
+        "supabase_auth": bool(c.settings.effective_supabase_url and c.settings.effective_supabase_anon_key),
+    }
+
+
+@router.get("/system/config", summary="Публичная конфигурация системы для фронтенда")
+def system_config(c: ContainerDep) -> dict:
+    return {
+        "version": __version__,
+        "demo": c.settings.demo_mode,
+        "environment": c.settings.environment,
+        "supabase": {
+            "enabled": bool(c.settings.effective_supabase_url and c.settings.effective_supabase_anon_key),
+            "url": c.settings.effective_supabase_url,
+            "anon_key": c.settings.effective_supabase_anon_key,
+            "is_primary": c.db.is_primary,
+            "primary_ok": c.db.state.get("primary_ok"),
+            "mode": c.db.state.get("mode"),
+            "configured": c.db.state.get("configured", False),
+        },
     }
 
 
 @router.get("/system/db", summary="Какая база работает: Supabase или локальная, зеркало, связь")
 def db_status(c: ContainerDep, _: ViewerDep) -> dict:
-    return {**c.db.status(), "counts": c.db.counts()}
+    return {
+        **c.db.status(),
+        "counts": c.db.counts(),
+        "demo_mode": c.settings.demo_mode,
+        "supabase_auth": bool(c.settings.effective_supabase_url and c.settings.effective_supabase_anon_key),
+        "supabase_service": c.supabase.is_configured,
+        "supabase_url": c.settings.effective_supabase_url,
+    }
+
+
+@router.post("/system/supabase/seed-users", summary="Синхронизировать демо-пользователей в Supabase Auth")
+def seed_supabase_users(c: ContainerDep, session: AdminDep) -> dict:
+    if not c.settings.demo_mode:
+        raise ValidationFailed("Синхронизация демо-пользователей доступна только в демо-режиме")
+    if not c.supabase.is_configured:
+        raise ValidationFailed("SUPABASE_URL или SUPABASE_SERVICE_ROLE_KEY не заданы в .env")
+    result = c.supabase.seed_demo_users()
+    c.audit.log(
+        "system",
+        "auth",
+        f"Синхронизация с Supabase Auth: создано {result.get('created', 0)}, обновлено {result.get('updated', 0)}",
+        actor=session.name,
+    )
+    return result
 
 
 @router.post("/system/db/mirror", summary="Обновить локальное зеркало Supabase сейчас")

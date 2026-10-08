@@ -49,7 +49,12 @@ async function send(path: string, init: { method?: string; body?: unknown; query
   } catch {
     throw new ApiError(0, "network", "Сервер недоступен. Проверьте, что бэкенд запущен.");
   }
-  if (res.status === 401 && token) session.clear();
+  if (res.status === 401 && token) {
+    session.clear();
+    void import("@/shared/supabase/supabase")
+      .then(({ signOutSupabase }) => signOutSupabase())
+      .catch((error: unknown) => console.warn("Supabase Auth sign-out failed:", error));
+  }
   if (res.status === 404 && sandbox && !path.startsWith("/sandbox")) sim.exit();
   if (!res.ok) {
     let parsed: ErrorBody | null = null;

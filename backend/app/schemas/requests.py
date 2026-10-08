@@ -17,6 +17,10 @@ class LoginIn(Strict):
     user_id: int | None = Field(default=None, ge=1)
 
 
+class SupabaseSessionIn(Strict):
+    access_token: str = Field(min_length=1, max_length=4096)
+
+
 class UserIn(Strict):
     name: str = Field(min_length=2, max_length=80)
     position: str = Field(min_length=2, max_length=80)

@@ -134,6 +134,19 @@ class FailoverDatabase:
             log.warning("%s недоступен при старте — работаю на локальной базе", self.label)
         return self.state["mode"]
 
+    def hold_local_for_decision(self) -> None:
+        if self.primary is None or not self.state["primary_ok"]:
+            raise RuntimeError(f"{self.label} должен быть доступен для выбора базы")
+        with self._lock:
+            self._active = self.local
+            self.state.update(
+                mode="local",
+                since=datetime.now(),
+                outage=False,
+                needs_decision=True,
+                last_error="локальная база содержит несинхронизированные данные",
+            )
+
     def start(self) -> None:
         if self.primary is None or self._thread is not None:
             return

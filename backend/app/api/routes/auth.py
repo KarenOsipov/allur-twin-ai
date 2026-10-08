@@ -1,11 +1,14 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Request
+from sqlalchemy import select
 
 from app.api.deps import ContainerDep, SessionDep, client_ip
 from app.core.errors import AppError, ForbiddenError, TooManyRequestsError, ValidationFailed
 from app.core.security import Role, create_token
-from app.schemas.requests import LoginIn, RegisterIn
+from app.db.models import User
+from app.schemas.requests import LoginIn, RegisterIn, SupabaseSessionIn
+from app.services.user_service import public
 
 router = APIRouter(prefix="/auth", tags=["Вход"])
 
@@ -69,7 +72,83 @@ def login(body: LoginIn, request: Request, c: ContainerDep) -> dict:
         area=user["area"],
         ttl_hours=c.settings.token_ttl_hours,
     )
-    return {"token": token, "expires_at": expires_at, **user}
+    supabase_auth_synced = False
+    if c.supabase.is_configured and user.get("login"):
+        supabase_auth_synced = c.supabase.sync_local_login(user, body.pin)
+    return {
+        "token": token,
+        "expires_at": expires_at,
+        "supabase_auth_synced": supabase_auth_synced,
+        **user,
+    }
+
+
+@router.post("/supabase-session", summary="Проверить Supabase Auth и выдать токен приложения")
+def supabase_session(body: SupabaseSessionIn, request: Request, c: ContainerDep) -> dict:
+    ip = client_ip(request)
+    key = f"login:{ip}"
+    wait = c.login_limiter.blocked_for(key)
+    if wait > 0:
+        raise TooManyRequestsError(f"Слишком много попыток. Повторите через {int(wait) + 1} с")
+
+    try:
+        auth_user = c.supabase.verify_access_token(body.access_token)
+        email = auth_user["email"]
+        app_metadata = auth_user.get("app_metadata")
+        prefix, separator, domain = email.partition("@")
+        if not separator or domain != "allur.local":
+            raise ForbiddenError("Для входа используйте учётную запись, заведённую администратором системы")
+
+        with c.db.session() as db_session:
+            user = db_session.scalar(select(User).where(User.login == prefix.lower()))
+            if user is None or not user.active or user.status not in (None, "active"):
+                raise ForbiddenError("Учётная запись не найдена, отключена или не подтверждена администратором")
+            if (
+                not isinstance(app_metadata, dict)
+                or str(app_metadata.get("user_id")) != str(user.id)
+                or app_metadata.get("role") != user.role
+                or app_metadata.get("area") != user.area
+            ):
+                raise ForbiddenError("Учётная запись Supabase не синхронизирована с профилем сотрудника")
+            identity = {
+                "id": user.id,
+                "name": user.name,
+                "position": user.position,
+                "role": user.role,
+                "role_name": public(user)["role_name"],
+                "area": user.area,
+                "login": user.login,
+                "demo_pin": None,
+            }
+    except AppError as e:
+        c.login_limiter.hit(key)
+        c.audit.log(
+            "auth",
+            "login_failed",
+            "Неудачный вход через Supabase Auth",
+            severity="warning",
+            details={"ip": ip, "Причина": e.message},
+        )
+        raise
+
+    c.login_limiter.reset(key)
+    token, expires_at = create_token(
+        c.settings.signing_key(),
+        user_id=identity["id"],
+        role=Role(identity["role"]),
+        name=identity["name"],
+        position=identity["position"],
+        area=identity["area"],
+        ttl_hours=c.settings.token_ttl_hours,
+    )
+    c.audit.log(
+        "auth",
+        "login",
+        f"Вход через Supabase Auth: {identity['name']} — {identity['position'].lower()}",
+        actor=identity["name"],
+        details={"ip": ip, "login": identity["login"]},
+    )
+    return {"token": token, "expires_at": expires_at, **identity}
 
 
 @router.post("/register", summary="Заявка на доступ: сотрудник войдёт после подтверждения администратором")

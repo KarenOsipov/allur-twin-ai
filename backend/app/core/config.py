@@ -31,7 +31,12 @@ class Settings(BaseSettings):
     data_dir: Path = Path("./data")
     database_url: str | None = None
     supabase_db_url: SecretStr | None = None
-    db_check_s: float = 20
+    supabase_url: str | None = None
+    supabase_anon_key: str | None = None
+    supabase_service_role_key: SecretStr | None = None
+    vite_supabase_url: str | None = None
+    vite_supabase_anon_key: str | None = None
+    db_check_s: float = 5
     db_mirror_min: float = 5
 
     sim_speed: float = 1.0
@@ -81,6 +86,20 @@ class Settings(BaseSettings):
         if "sslmode=" not in raw and not local:
             raw += ("&" if "?" in raw else "?") + "sslmode=require"
         return raw
+
+    @property
+    def effective_supabase_url(self) -> str | None:
+        url = self.supabase_url or self.vite_supabase_url
+        return url.strip() if url else None
+
+    @property
+    def effective_supabase_anon_key(self) -> str | None:
+        key = self.supabase_anon_key or self.vite_supabase_anon_key
+        return key.strip() if key else None
+
+    @property
+    def is_supabase_configured(self) -> bool:
+        return bool(self.primary_db_url or (self.effective_supabase_url and self.effective_supabase_anon_key))
 
     @property
     def is_production(self) -> bool:

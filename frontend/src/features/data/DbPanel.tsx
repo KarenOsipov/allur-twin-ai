@@ -57,6 +57,26 @@ export function DbPanel() {
               Обновить зеркало сейчас
             </Button>
           )}
+          {s.demo_mode && s.supabase_service && (
+            <Button
+              variant="secondary"
+              size="sm"
+              loading={act.seedSupabase.isPending}
+              onClick={() =>
+                act.seedSupabase.mutate(undefined, {
+                  onSuccess: (res) =>
+                    toast({
+                      title: res.ok ? "Синхронизация с Supabase Auth завершена" : "Синхронизация прошла с ошибками",
+                      body: res.errors?.join("; ") || res.error || `Создано: ${res.created}, обновлено: ${res.updated}`,
+                      tone: res.ok ? "run" : "down",
+                    }),
+                  onError: fail,
+                })
+              }
+            >
+              Синхронизировать демо-пользователей в Supabase
+            </Button>
+          )}
           {!primary && s.configured && s.needs_decision && (
             <>
               <Button
@@ -76,17 +96,23 @@ export function DbPanel() {
         </div>
         {!primary && s.configured && s.needs_decision && !s.primary_ok && <p className="mt-2 text-xs text-ink-3">Кнопки станут доступны, когда {s.label} снова ответит.</p>}
       </Panel>
-      <Panel title="Как это устроено">
+      <Panel title="Архитектура Supabase + Локальный резерв">
         <ul className="flex flex-col gap-2.5 text-sm text-ink-2">
           <li>
-            <b className="text-ink">Supabase</b> подключается строкой <code className="rounded bg-sunken px-1">SUPABASE_DB_URL</code> в файле <code className="rounded bg-sunken px-1">.env</code>. Без неё всё работает на локальной базе.
+            <b className="text-ink">Облачная база:</b> Supabase PostgreSQL (<code className="rounded bg-sunken px-1">SUPABASE_DB_URL</code>). Все производственные данные, инциденты и чат хранятся в облаке.
           </li>
           <li>
-            Пока Supabase доступен, каждые несколько минут его данные копируются в <b className="text-ink">локальное зеркало</b>.
+            <b className="text-ink">Чат и события:</b> чат получает новые сообщения через Supabase Realtime с RLS-фильтрацией. WebSocket остаётся резервом для чата и передаёт остальные живые события.
           </li>
-          <li>Связь пропала — система за секунды переходит на зеркало, работа не останавливается.</li>
-          <li>Связь вернулась — всё, что внесли за это время, переносится обратно в Supabase.</li>
-          <li>Таблицы в Supabase закрыты от его публичного API: данные читает только сервер системы.</li>
+          <li>
+            <b className="text-ink">Авторизация:</b> вход через Supabase Auth автоматически создаётся для сотрудника при первом успешном локальном входе; права сверяются с профилем в базе приложения. При недоступности Auth доступен локальный вход.
+          </li>
+          <li className="rounded-lg bg-brand-soft/60 p-2 text-ink">
+            🛡️ <b className="text-brand">Локальный резерв:</b> При сбое Supabase новые операции переключаются на локальную базу. Запрос, который совпал с обрывом связи, может потребовать повторения; после восстановления данные аварийного режима переносятся обратно автоматически.
+          </li>
+          <li>
+            <b className="text-ink">Зеркало:</b> Полный снимок Supabase копируется в локальную базу каждые несколько минут. Если сервер стартовал без связи, перенос данных обратно требует решения администратора, чтобы не затереть облачные данные устаревшей копией.
+          </li>
         </ul>
       </Panel>
     </div>

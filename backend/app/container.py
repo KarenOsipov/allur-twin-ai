@@ -7,13 +7,16 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from sqlalchemy import func, inspect, select, text
+
 from app.assistant.engine import Assistant
 from app.core.clock import plant_now
 from app.core.config import Settings
 from app.core.events import EventBus
 from app.core.ratelimit import RateLimiter
 from app.db.base import Database
-from app.db.failover import FailoverDatabase
+from app.db.failover import FailoverDatabase, replicate
+from app.db.models import Base
 from app.db.schema import prepare_database
 from app.domain.plant import ALLUR, Plant
 from app.services import dataset_service
@@ -29,10 +32,59 @@ from app.services.params_service import ParamsService
 from app.services.sandbox_service import SandboxService
 from app.services.settings_service import SettingsService
 from app.services.shift_service import ShiftService
+from app.services.supabase_sync import SupabaseSyncService
 from app.services.user_service import UserService
 from app.sim.live import LiveFloor
 
 log = logging.getLogger(__name__)
+
+REFERENCE_TABLES = {"areas", "car_models", "equipment", "meta", "shifts"}
+FAILOVER_STATE_TABLE = "app_failover_state"
+
+
+def _ensure_failover_state(db: Database) -> None:
+    with db.engine.begin() as connection:
+        connection.execute(
+            text(
+                f"CREATE TABLE IF NOT EXISTS {FAILOVER_STATE_TABLE} "
+                "(id INTEGER PRIMARY KEY, local_changes_pending BOOLEAN NOT NULL)"
+            )
+        )
+        connection.execute(
+            text(
+                f"INSERT INTO {FAILOVER_STATE_TABLE} (id, local_changes_pending) "
+                "VALUES (1, false) ON CONFLICT (id) DO NOTHING"
+            )
+        )
+
+
+def _local_changes_pending(db: Database) -> bool:
+    with db.engine.connect() as connection:
+        return bool(
+            connection.scalar(
+                text(f"SELECT local_changes_pending FROM {FAILOVER_STATE_TABLE} WHERE id = 1")
+            )
+        )
+
+
+def _set_local_changes_pending(db: Database, pending: bool) -> None:
+    with db.engine.begin() as connection:
+        connection.execute(
+            text(
+                f"UPDATE {FAILOVER_STATE_TABLE} SET local_changes_pending = :pending WHERE id = 1"
+            ),
+            {"pending": pending},
+        )
+
+
+def _has_application_data(db: Database) -> bool:
+    names = set(inspect(db.engine).get_table_names())
+    for table in Base.metadata.sorted_tables:
+        if table.name in names and table.name not in REFERENCE_TABLES:
+            with db.engine.connect() as connection:
+                if connection.scalar(select(func.count()).select_from(table)):
+                    return True
+    return False
 
 
 @dataclass
@@ -55,6 +107,7 @@ class Container:
     advice: AdviceService
     floor_layout: FloorLayoutService
     chat: ChatService
+    supabase: SupabaseSyncService
     chat_limiter: RateLimiter
     register_limiter: RateLimiter
     login_limiter: RateLimiter
@@ -144,6 +197,7 @@ class Container:
             advice=advice,
             floor_layout=FloorLayoutService(db, plant, params, settings.tz_offset_min),
             chat=chat,
+            supabase=SupabaseSyncService(settings),
             chat_limiter=RateLimiter(20, 30),
             register_limiter=RateLimiter(5, 3600),
             login_limiter=RateLimiter(settings.login_attempts, settings.login_window_s),
@@ -158,7 +212,17 @@ class Container:
         except Exception as e:
             log.warning("Первое зеркало базы не сделано: %s", e)
 
+    def _seed_supabase_users(self) -> None:
+        result = self.supabase.seed_demo_users()
+        if not result["ok"]:
+            log.error(
+                "Supabase Auth: не удалось синхронизировать демо-пользователей: %s",
+                "; ".join(result.get("errors", [])),
+            )
+
     def _db_switched(self, status: dict) -> None:
+        if self.db.primary is not None:
+            _set_local_changes_pending(self.db.local, status["mode"] == "local")
         self.data.touch()
         self.users._active.clear()
         if status["mode"] == "local" and status.get("needs_decision"):
@@ -199,10 +263,26 @@ class Container:
     def start(self) -> None:
         self.db.prepare = lambda d: prepare_database(d, self.plant)
         self._wait_local_db()
+        _ensure_failover_state(self.db.local)
+        local_changes_pending = _local_changes_pending(self.db.local)
         self.db.connect()
         if self.db.primary is not None:
+            if local_changes_pending and self.db.is_primary:
+                self.db.hold_local_for_decision()
+            elif not self.db.is_primary:
+                _set_local_changes_pending(self.db.local, True)
             prepare_database(self.db.local, self.plant)
+            local_has_data = _has_application_data(self.db.local)
+            primary_has_data = (
+                _has_application_data(self.db.primary) if self.db.state["primary_ok"] else False
+            )
+        else:
+            local_has_data = False
+            primary_has_data = False
         prepare_database(self.db, self.plant)
+        if self.db.is_primary and self.db.primary is not None and local_has_data and not primary_has_data:
+            counts = replicate(self.db.local, self.db.primary)
+            log.info("Первичный перенос локальных данных в Supabase завершён: %d строк", sum(counts.values()))
         first_start = self.data.is_empty()
         self.data.seed_if_empty(self.settings.history_days)
         self.users.seed()
@@ -215,6 +295,8 @@ class Container:
                 seed_demo(self.db, self.plant, today, self.economics.margin())
         if self.settings.demo_mode:
             self._seed_chat()
+            if self.supabase.is_configured:
+                threading.Thread(target=self._seed_supabase_users, name="sb-auth-sync", daemon=True).start()
         self.floor_layout.ensure_default()
         self.db.on_switch.append(self._db_switched)
         if self.db.is_primary:

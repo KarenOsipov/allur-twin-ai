@@ -45,6 +45,7 @@ import { ChatDock } from "@/shared/chat/ChatDock";
 import { FullReportButton, FullReportSheet } from "@/shared/export/FullReport";
 import { chatBus, useChatState } from "@/shared/chat/bus";
 import { connectLive, disconnectLive, useFloor, useLiveStatus } from "@/shared/realtime/live";
+import { signOutSupabase } from "@/shared/supabase/supabase";
 import { IconButton } from "@/shared/ui/Button";
 import { Drawer } from "@/shared/ui/Drawer";
 import { Logo } from "@/shared/ui/Logo";
@@ -291,6 +292,7 @@ function UserButton() {
   }, [open]);
   const logout = () => {
     request("/auth/logout", { method: "POST" }).catch(() => undefined);
+    void signOutSupabase();
     sim.exit();
     chatBus.close();
     chatBus.select(null);

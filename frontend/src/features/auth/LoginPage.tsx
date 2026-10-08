@@ -9,6 +9,7 @@ import { homeOf, session, useSession } from "@/shared/auth/session";
 import { Button } from "@/shared/ui/Button";
 import { AllurLogo, Logo } from "@/shared/ui/Logo";
 import { Sheet } from "@/shared/ui/Sheet";
+import { loginWithSupabase } from "@/shared/supabase/supabase";
 
 type Mode = "pin" | "password";
 const MODE_KEY = "allur.login.mode";
@@ -307,7 +308,19 @@ function PinForm({ initial, onDone }: { initial: string; onDone: (o: LoginOut) =
     setBusy(true);
     setError(null);
     try {
-      onDone(await request<LoginOut>("/auth/login", { method: "POST", body: { pin } }));
+      const localOut = await request<LoginOut>("/auth/login", { method: "POST", body: { pin } });
+      if (localOut.supabase_auth_synced && localOut.login) {
+        try {
+          const supabaseOut = await loginWithSupabase(localOut.login, pin);
+          if (supabaseOut) {
+            onDone(supabaseOut);
+            return;
+          }
+        } catch (syncErr) {
+          console.warn("Учётная запись создана, но вход через Supabase Auth пока не удался:", syncErr);
+        }
+      }
+      onDone(localOut);
     } catch (err) {
       setError((err as Error).message);
       setPin("");
@@ -404,8 +417,37 @@ function PasswordForm({ initialLogin, initialPassword, onDone }: { initialLogin:
     if (!password) return setError("Введите пароль"), second.current?.focus();
     setBusy(true);
     setError(null);
+
+    let handled = false;
     try {
-      onDone(await request<LoginOut>("/auth/login", { method: "POST", body: { login: login.trim(), pin: password } }));
+      const sbOut = await loginWithSupabase(login.trim(), password);
+      if (sbOut) {
+        onDone(sbOut);
+        handled = true;
+      }
+    } catch (sbErr) {
+      console.warn("Supabase Auth не ответил или вернул ошибку, перехожу на резервную базу:", sbErr);
+    }
+
+    if (handled) {
+      setBusy(false);
+      return;
+    }
+
+    try {
+      const localOut = await request<LoginOut>("/auth/login", { method: "POST", body: { login: login.trim(), pin: password } });
+      if (localOut.supabase_auth_synced) {
+        try {
+          const syncedOut = await loginWithSupabase(login.trim(), password);
+          if (syncedOut) {
+            onDone(syncedOut);
+            return;
+          }
+        } catch (syncErr) {
+          console.warn("Учётная запись создана, но вход через Supabase Auth пока не удался:", syncErr);
+        }
+      }
+      onDone(localOut);
     } catch (err) {
       setError((err as Error).message);
       setPassword("");

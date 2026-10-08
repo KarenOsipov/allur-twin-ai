@@ -11,6 +11,7 @@ import { can, session, useSession } from "@/shared/auth/session";
 import { ChatDock } from "@/shared/chat/ChatDock";
 import { chatBus } from "@/shared/chat/bus";
 import { connectLive, disconnectLive } from "@/shared/realtime/live";
+import { signOutSupabase } from "@/shared/supabase/supabase";
 import { EQ_STATUS, AREA_STATE, STATE_COLOR, dateTime, num, time } from "@/shared/lib/format";
 
 const sameDay = (s: string) => new Date(s).toDateString() === new Date().toDateString();
@@ -44,6 +45,7 @@ export function WorkerPage() {
 
   const logout = () => {
     request("/auth/logout", { method: "POST" }).catch(() => undefined);
+    void signOutSupabase();
     chatBus.close();
     session.clear({ logout: true });
     qc.clear();

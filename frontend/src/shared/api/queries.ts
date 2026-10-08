@@ -272,10 +272,16 @@ export function setPresence(qc: QueryClient, userId: number, online: boolean) {
 
 export function addChatMessage(qc: QueryClient, m: ChatMessage) {
   const list = qc.getQueryData<ChatChannel[]>(["chat-channels"]);
+  const known = qc.getQueryData<ChatMessage[]>(["chat", m.channel])?.some((x) => x.id === m.id)
+    || list?.some((c) => c.id === m.channel && c.last?.id === m.id);
   if (list && !list.some((c) => c.id === m.channel)) qc.invalidateQueries({ queryKey: ["chat-channels"] });
   qc.setQueryData<ChatMessage[]>(["chat", m.channel], (old) => (old ? (old.some((x) => x.id === m.id) ? old : [...old, m]) : old));
   qc.setQueryData<ChatChannel[]>(["chat-channels"], (old) =>
-    old?.map((c) => (c.id === m.channel ? { ...c, last: m, unread: m.author_id === session.get()?.id ? c.unread : c.unread + 1 } : c)),
+    old?.map((c) =>
+      c.id === m.channel
+        ? { ...c, last: m, unread: known || m.author_id === session.get()?.id ? c.unread : c.unread + 1 }
+        : c,
+    ),
   );
 }
 
@@ -459,5 +465,11 @@ export function useDbActions() {
   return {
     mirror: useMutation({ mutationFn: () => request<DbStatus>("/system/db/mirror", { method: "POST" }), onSuccess: done }),
     usePrimary: useMutation({ mutationFn: (transfer: boolean) => request<DbStatus>("/system/db/use-primary", { method: "POST", query: { transfer } }), onSuccess: done }),
+    seedSupabase: useMutation({
+      mutationFn: () => request<{ ok: boolean; created: number; updated: number; error?: string; errors?: string[] }>(
+        "/system/supabase/seed-users",
+        { method: "POST" },
+      ),
+    }),
   };
 }

@@ -19,18 +19,18 @@ from app.analytics import kpi
 from app.domain.plant import Plant
 
 DEFAULTS = {
-    "reaction_before_min": 12.0,  # сейчас: пока рабочий найдёт мастера, мастер — ремонтника
-    "reaction_after_min": 3.0,  # с двойником: сообщение с телефона, анализ за минуту
-    "downtime_line_share": 0.6,  # какая часть простоя станка превращается в потерю выпуска (буферы спасают)
-    "predictive_share": 0.2,  # доля внеплановых отказов, которые профилактика по прогнозу предотвращает
-    "defect_catch_share": 0.3,  # доля брака сверх нормы, которую ловят раньше благодаря контролю трендов
-    "report_hours_before": 1.5,  # часов на отчёты у начальника смены за смену
+    "reaction_before_min": 12.0,
+    "reaction_after_min": 3.0,
+    "downtime_line_share": 0.6,
+    "predictive_share": 0.2,
+    "defect_catch_share": 0.3,
+    "report_hours_before": 1.5,
     "report_hours_after": 0.25,
-    "analyst_hours_day": 2.0,  # часов в день на сбор данных и сводки у планового отдела
+    "analyst_hours_day": 2.0,
     "manager_rate_kzt_h": 6_500,
-    "overhead_kzt_min": 2_000,  # энергия и накладные расходы минуты работы линии
-    "implementation_kzt": 25_000_000,  # внедрение: интеграция, обучение, оборудование
-    "support_kzt_month": 1_500_000,  # сопровождение и сервер
+    "overhead_kzt_min": 2_000,
+    "implementation_kzt": 25_000_000,
+    "support_kzt_month": 1_500_000,
 }
 
 LABELS = {
@@ -59,9 +59,9 @@ def roi(ds, plant: Plant, today, econ: dict) -> dict:
     start = end - timedelta(days=29)
     p = kpi.period_kpis(ds, plant, start, end)
     days = max(p["days"], 1)
-    k = WORKDAYS / days  # пересчёт в рабочий месяц
+    k = WORKDAYS / days
 
-    cars_per_min = 60 / plant.takt_s  # такт 240 с → 0,25 авто в минуту
+    cars_per_min = 60 / plant.takt_s
     downtime = [r for r in ds.downtime if start <= r.day <= end and not r.planned]
     stops = len(downtime) * k
     unplanned_min = sum(r.minutes for r in downtime) * k
@@ -73,7 +73,7 @@ def roi(ds, plant: Plant, today, econ: dict) -> dict:
     cost_min_margin = margin * cars_per_min
     staff = econ.get("line_staff", 60)
     cost_min = staff * econ.get("overtime_rate_kzt_h", 5250) / 60 + a["overhead_kzt_min"]
-    k_margin = cost_min_margin / cost_min  # во сколько раз оценка по марже выше
+    k_margin = cost_min_margin / cost_min
     losses = {
         "downtime_kzt": round(unplanned_min * a["downtime_line_share"] * cost_min),
         "downtime_kzt_margin": round(unplanned_min * a["downtime_line_share"] * cost_min_margin),

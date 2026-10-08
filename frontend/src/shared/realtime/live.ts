@@ -5,6 +5,7 @@ import type { ChatMessage, Floor, Incident } from "@/shared/api/types";
 import { chatBus } from "@/shared/chat/bus";
 import { alerts } from "@/shared/alerts/store";
 import { can, session } from "@/shared/auth/session";
+import { ensureSupabase, hasSupabaseSession, signOutSupabase, subscribeSupabaseChat } from "@/shared/supabase/supabase";
 import { toast } from "@/shared/ui/Toaster";
 
 type Status = "connecting" | "online" | "offline";
@@ -18,6 +19,19 @@ let socket: WebSocket | null = null;
 let retry = 0;
 let timer: number | undefined;
 let stopped = true;
+let realtimeUnsub: (() => void) | null = null;
+let realtimeConnected = false;
+const seenChatMessages = new Set<number>();
+
+function receiveChatMessage(qc: QueryClient, message: ChatMessage) {
+  const alreadyLoaded = qc.getQueryData<ChatMessage[]>(["chat", message.channel])?.some((item) => item.id === message.id);
+  if (seenChatMessages.has(message.id)) return;
+  seenChatMessages.add(message.id);
+  if (seenChatMessages.size > 2000) seenChatMessages.delete(seenChatMessages.values().next().value!);
+  addChatMessage(qc, message);
+  chatBus.typingStop(message.channel, message.author_id);
+  if (!alreadyLoaded) chatBus.incoming(message);
+}
 
 function url() {
   const u = new URL("/api/v1/ws", window.location.href);
@@ -28,7 +42,23 @@ function url() {
 export function connectLive(qc: QueryClient) {
   stopped = false;
   const token = session.get()?.token;
-  if (!token || socket) return;
+  if (!token) return;
+
+  if (!realtimeUnsub) {
+    void Promise.all([ensureSupabase(), hasSupabaseSession()]).then(([supabase, authenticated]) => {
+      if (!supabase || !authenticated || realtimeUnsub || stopped) return;
+      realtimeUnsub = subscribeSupabaseChat({
+        onMessage: (message) => receiveChatMessage(qc, message),
+        onUpdate: (message) => updateChatMessage(qc, message),
+        onStatus: (connected) => {
+          realtimeConnected = connected;
+          if (connected) qc.invalidateQueries({ queryKey: ["chat-channels"] });
+        },
+      });
+    }).catch((error) => console.warn("Supabase Realtime initialization failed:", error));
+  }
+
+  if (socket) return;
   status = "connecting";
   emit();
   const ws = new WebSocket(url());
@@ -73,12 +103,9 @@ export function connectLive(qc: QueryClient) {
     } else if (msg.event === "shift.setup") {
       for (const k of ["shift-setup", "shift"]) qc.invalidateQueries({ queryKey: [k] });
     } else if (msg.event === "chat.message") {
-      const m = msg.data as ChatMessage;
-      addChatMessage(qc, m);
-      chatBus.typingStop(m.channel, m.author_id);
-      chatBus.incoming(m);
+      if (!realtimeConnected) receiveChatMessage(qc, msg.data as ChatMessage);
     } else if (msg.event === "chat.updated") {
-      updateChatMessage(qc, msg.data as ChatMessage);
+      if (!realtimeConnected) updateChatMessage(qc, msg.data as ChatMessage);
     } else if (msg.event === "chat.read") {
       const d = msg.data as { channel: string; user_id: number; last_id: number };
       if (d.user_id !== session.get()?.id) applyChatRead(qc, d.channel, d.last_id);
@@ -107,6 +134,7 @@ export function connectLive(qc: QueryClient) {
     emit();
     if (e.code === 4401) {
       session.clear();
+      void signOutSupabase();
       return;
     }
     if (stopped) return;
@@ -125,6 +153,9 @@ export function disconnectLive() {
   window.clearTimeout(timer);
   socket?.close();
   socket = null;
+  realtimeUnsub?.();
+  realtimeUnsub = null;
+  realtimeConnected = false;
 }
 
 export function useFloor(): Floor | null {

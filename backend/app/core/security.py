@@ -127,10 +127,10 @@ def create_token(
 
 
 def verify_token(token: str | None, secret: str) -> Session | None:
-    if not token or token.count(".") != 1 or len(token) > 2048:
+    if not token or len(token) > 4096:
         return None
-    payload, sig = token.split(".", 1)
-    if not secrets.compare_digest(sig, _sign(secret, payload)):
+    payload, separator, signature = token.partition(".")
+    if not separator or not secrets.compare_digest(signature, _sign(secret, payload)):
         return None
     try:
         data = json.loads(_unb64(payload))

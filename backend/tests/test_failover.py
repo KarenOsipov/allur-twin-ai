@@ -75,6 +75,20 @@ def test_startup_without_primary_uses_local(tmp_path):
         db.use_primary(transfer=True)
 
 
+def test_hold_local_for_decision_preserves_pending_data(tmp_path):
+    primary, local = _db(tmp_path, "primary.db"), _db(tmp_path, "local.db")
+    db = FailoverDatabase(local, primary)
+    assert db.connect() == "primary"
+    _add_user(local, "offline-user")
+    db.hold_local_for_decision()
+    assert not db.is_primary
+    assert db.status()["needs_decision"]
+    assert _users(local) == 1 and _users(primary) == 0
+
+    db.use_primary(transfer=True)
+    assert db.is_primary and _users(primary) == 1
+
+
 def test_runtime_outage_and_return(tmp_path, monkeypatch):
     primary, local = _db(tmp_path, "supabase.db"), _db(tmp_path, "local.db")
     db = FailoverDatabase(local, primary)
@@ -130,9 +144,161 @@ def test_app_starts_on_local_when_supabase_down(tmp_path, monkeypatch):
             tok = c.post("/api/v1/auth/login", json={"login": "admin", "pin": "0000"}).json()["token"]
             st = c.get("/api/v1/system/db", headers={"Authorization": f"Bearer {tok}"}).json()
             assert st["mode"] == "local" and st["needs_decision"] and st["counts"]["users"] >= 9
+            from app.container import _local_changes_pending
+
+            assert _local_changes_pending(c.app.state.container.db.local)
             assert "u:p@" not in str(st), "строка подключения не уходит наружу"
             with c.app.state.container.db.session() as s:
                 assert (s.scalar(select(func.count(ChatMessage.id))) or 0) > 0
     finally:
         del os.environ["SUPABASE_DB_URL"]
         get_settings.cache_clear()
+
+
+def test_supabase_access_token_cannot_be_used_as_app_token():
+    import base64
+    import json
+    import time
+
+    from app.core.security import verify_token
+
+    header = base64.urlsafe_b64encode(b'{"alg":"HS256","typ":"JWT"}').rstrip(b"=").decode()
+    payload_data = {
+        "sub": "user-uuid-123",
+        "email": "director@allur.local",
+        "exp": int(time.time()) + 3600,
+        "user_metadata": {
+            "name": "Айгерим Касымова",
+            "role": "director",
+            "position": "Директор по производству",
+            "user_id": 2,
+        },
+    }
+    payload = base64.urlsafe_b64encode(json.dumps(payload_data).encode()).rstrip(b"=").decode()
+    token = f"{header}.{payload}.dummy_signature"
+
+    assert verify_token(token, "local-secret") is None
+
+
+def test_supabase_access_token_is_verified_by_auth_api(monkeypatch):
+    from app.services.supabase_sync import SupabaseSyncService
+
+    service = SupabaseSyncService(
+        Settings(supabase_url="https://project.supabase.co", supabase_anon_key="public-key")
+    )
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {
+                "email": "director@allur.local",
+                "app_metadata": {"user_id": 2, "role": "director", "area": None},
+            }
+
+    def fake_get(url, *, headers, timeout):
+        assert url == "https://project.supabase.co/auth/v1/user"
+        assert headers == {"apikey": "public-key", "Authorization": "Bearer verified-token"}
+        assert timeout == 8.0
+        return Response()
+
+    monkeypatch.setattr("app.services.supabase_sync.httpx.get", fake_get)
+    assert service.verify_access_token("verified-token") == {
+        "email": "director@allur.local",
+        "app_metadata": {"user_id": 2, "role": "director", "area": None},
+    }
+
+
+def test_supabase_session_uses_local_user_role(client, monkeypatch):
+    container = client.app.state.container
+    monkeypatch.setattr(
+        container.supabase,
+        "verify_access_token",
+        lambda _: {
+            "email": "director@allur.local",
+            "app_metadata": {"user_id": 2, "role": "director", "area": None},
+        },
+    )
+
+    response = client.post("/api/v1/auth/supabase-session", json={"access_token": "verified-by-auth"})
+    assert response.status_code == 200
+    result = response.json()
+    assert result["role"] == "director"
+    assert result["id"] == 2
+    assert result["token"].count(".") == 1
+    me = client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {result['token']}"})
+    assert me.status_code == 200
+    assert me.json()["role"] == "director"
+
+
+def test_supabase_session_rejects_inactive_local_user(client, monkeypatch):
+    container = client.app.state.container
+    monkeypatch.setattr(
+        container.supabase,
+        "verify_access_token",
+        lambda _: {
+            "email": "director@allur.local",
+            "app_metadata": {"user_id": 2, "role": "director", "area": None},
+        },
+    )
+    from app.db.models import User
+
+    with container.db.session() as s:
+        user = s.get(User, 2)
+        user.active = False
+
+    response = client.post("/api/v1/auth/supabase-session", json={"access_token": "verified-by-auth"})
+    assert response.status_code == 403
+
+
+def test_supabase_session_rejects_untrusted_app_metadata(client, monkeypatch):
+    container = client.app.state.container
+    monkeypatch.setattr(
+        container.supabase,
+        "verify_access_token",
+        lambda _: {
+            "email": "director@allur.local",
+            "app_metadata": {"user_id": 2, "role": "admin", "area": None},
+        },
+    )
+
+    response = client.post("/api/v1/auth/supabase-session", json={"access_token": "verified-by-auth"})
+    assert response.status_code == 403
+
+
+def test_demo_auth_sync_is_disabled_outside_demo_mode(client, monkeypatch):
+    container = client.app.state.container
+    from tests.conftest import login
+
+    headers = login(client)
+    monkeypatch.setattr(container.settings, "demo_mode", False)
+    response = client.post(
+        "/api/v1/system/supabase/seed-users",
+        headers=headers,
+    )
+    assert response.status_code == 422
+
+
+def test_local_login_syncs_supabase_auth_account(client, monkeypatch):
+    container = client.app.state.container
+    calls = []
+    monkeypatch.setattr(type(container.supabase), "is_configured", property(lambda _: True))
+    monkeypatch.setattr(
+        container.supabase,
+        "sync_local_login",
+        lambda user, password: calls.append((user["login"], password)) or True,
+    )
+
+    response = client.post("/api/v1/auth/login", json={"pin": "0000"})
+    assert response.status_code == 200
+    assert response.json()["supabase_auth_synced"] is True
+    assert calls == [("admin", "0000")]
+
+
+def test_supabase_config_endpoint(client):
+    res = client.get("/api/v1/system/config")
+    assert res.status_code == 200
+    data = res.json()
+    assert "supabase" in data
+    assert "mode" in data["supabase"]

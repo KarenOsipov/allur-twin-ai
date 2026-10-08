@@ -74,6 +74,8 @@ def prepare_database(db: Database, plant: Plant) -> None:
         drop_views(db)
         old = MetaData()
         old.reflect(db.engine)
+        if "app_failover_state" in old.tables:
+            old.remove(old.tables["app_failover_state"])
         old.drop_all(db.engine)
     db.create_all()
     _add_columns(db)
@@ -92,14 +94,106 @@ def lock_down_rest_api(db: Database) -> None:
         roles = {
             r for (r,) in conn.execute(text("SELECT rolname FROM pg_roles WHERE rolname IN ('anon', 'authenticated')"))
         }
+        auth_schema_exists = conn.execute(text("SELECT 1 FROM pg_namespace WHERE nspname = 'auth'")).scalar()
+        can_configure_realtime = (
+            "authenticated" in roles and "chat_messages" in tables and bool(auth_schema_exists)
+        )
+        if "authenticated" in roles and "chat_messages" in tables and not auth_schema_exists:
+            log.warning("PostgreSQL auth schema is missing; chat will use the WebSocket fallback")
         views = [v for (v,) in conn.execute(text("SELECT viewname FROM pg_views WHERE schemaname = current_schema()"))]
+        for role in sorted(roles):
+            conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON TABLES FROM {role}"))
+            conn.execute(text(f"ALTER DEFAULT PRIVILEGES IN SCHEMA public REVOKE ALL ON SEQUENCES FROM {role}"))
         for t in tables:
             conn.execute(text(f'ALTER TABLE "{t}" ENABLE ROW LEVEL SECURITY'))
         for r in sorted(roles):
             for name in tables + [v for v in views if v.startswith("v_")]:
                 conn.execute(text(f'REVOKE ALL ON "{name}" FROM {r}'))
+            conn.execute(text(f"REVOKE ALL ON ALL SEQUENCES IN SCHEMA public FROM {r}"))
+
+        if can_configure_realtime:
+            conn.execute(
+                text(
+                    """
+                    CREATE OR REPLACE FUNCTION public.can_read_chat_message(target_channel text)
+                    RETURNS boolean
+                    LANGUAGE sql
+                    STABLE
+                    SECURITY DEFINER
+                    SET search_path = ''
+                    AS $function$
+                        SELECT EXISTS (
+                            SELECT 1
+                            FROM public.users AS employee
+                            WHERE employee.id = CASE
+                                WHEN COALESCE(auth.jwt() -> 'app_metadata' ->> 'user_id', '') ~ '^[0-9]+$'
+                                THEN (auth.jwt() -> 'app_metadata' ->> 'user_id')::integer
+                                ELSE NULL
+                            END
+                            AND employee.active IS TRUE
+                            AND (employee.status IS NULL OR employee.status = 'active')
+                            AND (
+                                target_channel = 'all'
+                                OR target_channel ~ (
+                                    '^dm:('
+                                    || employee.id::text
+                                    || '-[0-9]+|[0-9]+-'
+                                    || employee.id::text
+                                    || ')$'
+                                )
+                                OR (
+                                    employee.role <> 'worker'
+                                    AND target_channel !~ '^dm:'
+                                )
+                                OR (
+                                    employee.role = 'worker'
+                                    AND target_channel = employee.area
+                                )
+                            )
+                        )
+                    $function$
+                    """
+                )
+            )
+            conn.execute(text("REVOKE ALL ON FUNCTION public.can_read_chat_message(text) FROM PUBLIC"))
+            for r in sorted(roles):
+                conn.execute(text(f"REVOKE ALL ON FUNCTION public.can_read_chat_message(text) FROM {r}"))
+
+        if "chat_messages" in tables:
+            conn.execute(text('DROP POLICY IF EXISTS "chat_messages_select_all" ON "chat_messages"'))
+            conn.execute(text('DROP POLICY IF EXISTS "chat_messages_insert_all" ON "chat_messages"'))
+            conn.execute(text('DROP POLICY IF EXISTS "chat_messages_realtime_select" ON "chat_messages"'))
+            if can_configure_realtime:
+                conn.execute(text('GRANT SELECT ON "chat_messages" TO authenticated'))
+                conn.execute(text("GRANT EXECUTE ON FUNCTION public.can_read_chat_message(text) TO authenticated"))
+                conn.execute(
+                    text(
+                        """
+                        CREATE POLICY "chat_messages_realtime_select" ON "chat_messages"
+                        FOR SELECT TO authenticated
+                        USING (public.can_read_chat_message(channel))
+                        """
+                    )
+                )
+                conn.execute(text('ALTER TABLE "chat_messages" REPLICA IDENTITY FULL'))
+                published = conn.execute(
+                    text(
+                        "SELECT 1 FROM pg_publication_tables "
+                        "WHERE pubname = 'supabase_realtime' "
+                        "AND schemaname = current_schema() AND tablename = 'chat_messages'"
+                    )
+                ).scalar()
+                if not published:
+                    publication_exists = conn.execute(
+                        text("SELECT 1 FROM pg_publication WHERE pubname = 'supabase_realtime'")
+                    ).scalar()
+                    if publication_exists:
+                        conn.execute(text('ALTER PUBLICATION supabase_realtime ADD TABLE "chat_messages"'))
+                    else:
+                        log.warning("Supabase Realtime publication is missing; chat will use the WebSocket fallback")
+
     if roles:
-        log.info("Supabase: таблицы закрыты от REST API (RLS, права anon/authenticated сняты)")
+        log.info("Supabase: права anon/authenticated на таблицы и последовательности отозваны")
 
 
 _NEW_COLUMNS = {

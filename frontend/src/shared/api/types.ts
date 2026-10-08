@@ -27,6 +27,7 @@ export interface StaffFull extends StaffMember {
 export interface LoginOut extends StaffMember {
   token: string;
   expires_at: number;
+  supabase_auth_synced?: boolean;
 }
 
 export interface UsersOut {
@@ -826,4 +827,23 @@ export interface DbStatus {
   needs_decision: boolean;
   local_kind: string;
   counts?: Record<string, number>;
+  demo_mode?: boolean;
+  supabase_auth?: boolean;
+  supabase_service?: boolean;
+  supabase_url?: string | null;
+}
+
+export interface SystemConfig {
+  version: string;
+  demo: boolean;
+  environment: string;
+  supabase: {
+    enabled: boolean;
+    url: string | null;
+    anon_key: string | null;
+    is_primary: boolean;
+    primary_ok: boolean | null;
+    mode: string;
+    configured: boolean;
+  };
 }

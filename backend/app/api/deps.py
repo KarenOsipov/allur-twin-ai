@@ -18,8 +18,10 @@ def require_session(request: Request) -> Session:
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header.lower().startswith("bearer ") else None
     session = verify_token(token, c.settings.signing_key())
-    if session is None or not c.users.is_active(session.user_id):
+    if session is None:
         raise UnauthorizedError("Войдите в систему")
+    if not c.users.is_active(session.user_id):
+        raise UnauthorizedError("Пользователь заблокирован или не найден")
     return session
 
 

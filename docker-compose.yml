@@ -1,0 +1,56 @@
+name: allur-twin-ai
+
+services:
+  db:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: allur
+      POSTGRES_USER: allur
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-allur_local_dev}
+      TZ: Asia/Qostanay
+    volumes:
+      - allur-db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:${DB_PORT:-5432}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U allur -d allur"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+
+  backend:
+    build: ./backend
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      DATABASE_URL: postgresql://allur:${POSTGRES_PASSWORD:-allur_local_dev}@db:5432/allur
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - allur-data:/data
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "${PORT:-8080}:8080"
+    depends_on:
+      backend:
+        condition: service_healthy
+    read_only: true
+    tmpfs: [/tmp]
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+volumes:
+  allur-db:
+  allur-data:

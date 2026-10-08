@@ -1,0 +1,23 @@
+[project]
+name = "allur-twin-ai-backend"
+version = "1.0.0"
+description = "TAKT — цифровой двойник автомобильного завода (FastAPI + scikit-learn)"
+requires-python = ">=3.12"
+
+[tool.ruff]
+line-length = 120
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "S"]
+ignore = ["B008", "SIM108", "S101", "S311", "S608", "E731"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["S"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
